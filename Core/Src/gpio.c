@@ -40,6 +40,7 @@
         * EXTI
      PA1   ------> S_TIM2_CH2
      PB1   ------> S_TIM3_CH4
+     PB9   ------> S_TIM4_CH4
 */
 void MX_GPIO_Init(void)
 {
@@ -77,11 +78,17 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : Y_STEP_Pin */
-  GPIO_InitStruct.Pin = Y_STEP_Pin;
+  /*Configure GPIO pins : Y_STEP_Pin SERVO_Pin */
+  GPIO_InitStruct.Pin = Y_STEP_Pin|SERVO_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(Y_STEP_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : Y_LIM_Pin X_LIM_Pin */
+  GPIO_InitStruct.Pin = Y_LIM_Pin|X_LIM_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
 }
 

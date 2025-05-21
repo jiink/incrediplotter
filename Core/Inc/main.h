@@ -67,6 +67,12 @@ void Error_Handler(void);
 #define Y_STEP_GPIO_Port GPIOB
 #define LED_Pin GPIO_PIN_2
 #define LED_GPIO_Port GPIOB
+#define Y_LIM_Pin GPIO_PIN_7
+#define Y_LIM_GPIO_Port GPIOB
+#define X_LIM_Pin GPIO_PIN_8
+#define X_LIM_GPIO_Port GPIOB
+#define SERVO_Pin GPIO_PIN_9
+#define SERVO_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
