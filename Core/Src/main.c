@@ -21,6 +21,8 @@
 #include "tim.h"
 #include "usb_device.h"
 #include "gpio.h"
+#include "usbd_cdc_if.h"
+#include <stdbool.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -39,13 +41,20 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+#define STEPS_PER_MM 1
+#define UART_RX_BUF_SIZE 64
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+volatile int targetPosStepsX = 0;
+volatile int targetPosStepsY = 0;
+volatile int posStepsX = 0;
+volatile int posStepsY = 0;
+volatile uint8_t rxBuf[UART_RX_BUF_SIZE];
+volatile uint16_t rxBufIdx = 0;
+volatile bool gotCommand = false;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -96,7 +105,10 @@ int main(void)
   {
 	  Error_Handler();
   }
-
+  targetPosStepsX = 100;
+  targetPosStepsY = 100;
+  uint8_t msg[16] = "what?\r\n";
+  CDC_Transmit(msg, sizeof(msg));
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -157,12 +169,54 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+void Periodic()
+{
+	bool shouldStepX = posStepsX != targetPosStepsX;
+	bool dirX = targetPosStepsX > posStepsX;
+	if (shouldStepX)
+	{
+		HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+		HAL_GPIO_WritePin(X_DIR_GPIO_Port, X_DIR_Pin, dirX);
+		HAL_GPIO_WritePin(X_STEP_GPIO_Port, X_STEP_Pin, true);
+		volatile int delayer = 10;
+		while (delayer > 0) { delayer--; }
+		HAL_GPIO_WritePin(X_STEP_GPIO_Port, X_STEP_Pin, false);
+		if (dirX) {
+			posStepsX++;
+		} else {
+			posStepsX--;
+		}
+	}
+	bool shouldStepY = posStepsY != targetPosStepsY;
+	bool dirY = targetPosStepsY > posStepsY;
+	if (shouldStepY)
+	{
+		HAL_GPIO_WritePin(Y_DIR_GPIO_Port, Y_DIR_Pin, dirY);
+		HAL_GPIO_WritePin(Y_STEP_GPIO_Port, Y_STEP_Pin, true);
+		volatile int delayer = 10;
+		while (delayer > 0) { delayer--; }
+		HAL_GPIO_WritePin(Y_STEP_GPIO_Port, Y_STEP_Pin, false);
+		if (dirY) {
+			posStepsY++;
+		} else {
+			posStepsY--;
+		}
+	}
+}
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	if (htim->Instance == TIM1)
 	{
-		HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+		Periodic();
 	}
+}
+
+uint8_t CDC_DataReceivedHandler(const uint8_t *Buf, uint32_t len)
+{
+    CDC_Transmit(Buf, len);
+    return USBD_OK;
 }
 /* USER CODE END 4 */
 
