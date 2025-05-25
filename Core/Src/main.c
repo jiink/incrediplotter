@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "tim.h"
 #include "usb_device.h"
 #include "gpio.h"
 
@@ -88,7 +89,13 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USB_DEVICE_Init();
+  MX_TIM1_Init();
+  MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
+  if (HAL_TIM_Base_Start_IT(&htim1) != HAL_OK)
+  {
+	  Error_Handler();
+  }
 
   /* USER CODE END 2 */
 
@@ -150,7 +157,13 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+	if (htim->Instance == TIM1)
+	{
+		HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+	}
+}
 /* USER CODE END 4 */
 
 /**
