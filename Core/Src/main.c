@@ -36,18 +36,35 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+typedef struct {
+	uint8_t opcode;
+	uint8_t arg1;
+	uint8_t arg2;
+} PlotCmd;
+typedef enum {
+	OP_RESET,
+	OP_MOVE,
+	OP_MOVE_PEN,
+	OP_START_STORING,
+	OP_STOP_STORING,
+	OP_RUN_STORED,
+	OP_LED
+} PlotCmdOpcode;
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 #define STEPS_PER_MM 1
 #define UART_RX_BUF_SIZE 64
+#define MAX_STORED_PLOT_CMDS 16
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+volatile uint8_t VCP_RxBuffer[VCP_RX_BUFFER_SIZE];
+volatile uint32_t VCP_RxWriteIndex = 0; // Written by USB ISR
+volatile uint32_t VCP_RxReadIndex = 0;  // Read by application
 volatile int targetPosStepsX = 0;
 volatile int targetPosStepsY = 0;
 volatile int posStepsX = 0;
@@ -55,6 +72,7 @@ volatile int posStepsY = 0;
 volatile uint8_t rxBuf[UART_RX_BUF_SIZE];
 volatile uint16_t rxBufIdx = 0;
 volatile bool gotCommand = false;
+PlotCmd plotCmdBuf[MAX_STORED_PLOT_CMDS] = { 0 };
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -65,7 +83,29 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void USB_DEVICE_MasterHardReset(void)
+{
+	GPIO_InitTypeDef GPIO_InitStruct;
+	GPIO_InitStruct.Pin = GPIO_PIN_12;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+	HAL_GPIO_WritePin(GPIOA,GPIO_PIN_12, 0);
+	HAL_Delay(300);
+}
 
+// VCP = virtual com port
+int VCP_ReadChar(uint8_t *pChar)
+{
+  if (VCP_RxReadIndex != VCP_RxWriteIndex) // Check if buffer is not empty
+  {
+    *pChar = VCP_RxBuffer[VCP_RxReadIndex];
+    VCP_RxReadIndex = (VCP_RxReadIndex + 1) % VCP_RX_BUFFER_SIZE;
+    return 1; // Character read successfully
+  }
+  return 0; // Buffer is empty
+}
 /* USER CODE END 0 */
 
 /**
@@ -97,6 +137,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  USB_DEVICE_MasterHardReset();
   MX_USB_DEVICE_Init();
   MX_TIM1_Init();
   MX_TIM4_Init();
@@ -107,14 +148,29 @@ int main(void)
   }
   targetPosStepsX = 100;
   targetPosStepsY = 100;
-  uint8_t msg[16] = "what?\r\n";
-  CDC_Transmit(msg, sizeof(msg));
+  const char msg[] = "****** Incrediplotter v0.2 ******\r\n";
+  CDC_Transmit_FS((uint8_t*)msg, strlen(msg));
+  const char hi[] = "hello world";
+  CDC_Transmit_FS((uint8_t*)hi, strlen(hi));
+  const char hi2[] = "another message";
+  CDC_Transmit_FS((uint8_t*)hi2, strlen(hi2));
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  static char txBuf[16];
   while (1)
   {
+//	sprintf(txBuf, "ugh %u\r\n", count);
+//	count++;
+//	CDC_Transmit_FS((uint8_t*)txBuf, strlen(txBuf));
+//	HAL_Delay(100);
+	uint8_t rxByte = 0;
+	if (VCP_ReadChar(&rxByte))
+	{
+		sprintf(txBuf, "Got 0x%02X\r\n", rxByte);
+		CDC_Transmit_FS((uint8_t*)txBuf, strlen(txBuf));
+	}
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -213,11 +269,16 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	}
 }
 
-uint8_t CDC_DataReceivedHandler(const uint8_t *Buf, uint32_t len)
-{
-    CDC_Transmit(Buf, len);
-    return USBD_OK;
-}
+//uint8_t CDC_DataReceivedHandler(const uint8_t *Buf, uint32_t len)
+//{
+//	for (uint32_t i = 0; i < len; i++)
+//	{
+//		CDC_Transmit((const uint8_t*)"Got: ", 5);
+//		CDC_Transmit(&Buf[i], 1);
+//	}
+//	return CDC_RX_DATA_HANDLED;
+//
+//}
 /* USER CODE END 4 */
 
 /**
