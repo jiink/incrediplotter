@@ -48,8 +48,14 @@ typedef enum {
 	OP_START_STORING,
 	OP_STOP_STORING,
 	OP_RUN_STORED,
-	OP_LED
+	OP_LED,
+	OP_STOP
 } PlotCmdOpcode;
+typedef enum {
+	STATE_OPCODE,
+	STATE_ARG1,
+	STATE_ARG2
+} PlotCmdParseState;
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -72,6 +78,8 @@ volatile int posStepsY = 0;
 volatile uint8_t rxBuf[UART_RX_BUF_SIZE];
 volatile uint16_t rxBufIdx = 0;
 volatile bool gotCommand = false;
+bool storingPlotCmds = false;
+uint32_t storingPlotCmdsIdx = 0;
 PlotCmd plotCmdBuf[MAX_STORED_PLOT_CMDS] = { 0 };
 /* USER CODE END PV */
 
@@ -83,6 +91,16 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+int mmToSteps(int mm)
+{
+	return mm * STEPS_PER_MM;
+}
+
+int stepsToMm(int steps)
+{
+	return steps / STEPS_PER_MM;
+}
+
 void USB_DEVICE_MasterHardReset(void)
 {
 	GPIO_InitTypeDef GPIO_InitStruct;
@@ -105,6 +123,78 @@ int VCP_ReadChar(uint8_t *pChar)
     return 1; // Character read successfully
   }
   return 0; // Buffer is empty
+}
+
+bool ParsePlotCmdByte(PlotCmd* cmd, PlotCmdParseState* state, uint8_t newByte)
+{
+	bool cmdCompleted = false;
+	switch (*state)
+	{
+	case STATE_OPCODE:
+		cmd->opcode = newByte;
+		*state = STATE_ARG1;
+		break;
+	case STATE_ARG1:
+		cmd->arg1 = newByte;
+		*state = STATE_ARG2;
+		break;
+	case STATE_ARG2:
+		cmd->arg2 = newByte;
+		cmdCompleted = true;
+		*state = STATE_OPCODE;
+		break;
+	default:
+		break;
+	}
+	return cmdCompleted;
+}
+
+// returns false if overflowed (command storage isn't big enough)
+bool storePlotCmd(PlotCmd cmd)
+{
+	if (storingPlotCmdsIdx > MAX_STORED_PLOT_CMDS)
+	{
+		storingPlotCmdsIdx = 0;
+	}
+	plotCmdBuf[storingPlotCmdsIdx] = cmd;
+	storingPlotCmdsIdx++;
+	bool overflowed = false;
+	if (storingPlotCmdsIdx > MAX_STORED_PLOT_CMDS)
+	{
+		overflowed = true;
+		storingPlotCmdsIdx = 0;
+	}
+	return !overflowed;
+}
+
+void DoPlotCmd(PlotCmd cmd)
+{
+	if (cmd.opcode == OP_STOP_STORING)
+	{
+		storingPlotCmds = false;
+	}
+	if (storingPlotCmds)
+	{
+		storePlotCmd(cmd);
+		return;
+	}
+	switch (cmd.opcode)
+	{
+	case OP_LED:
+		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, cmd.arg1 != 0);
+		break;
+	case OP_MOVE:
+		targetPosStepsX = mmToSteps(cmd.arg1);
+		targetPosStepsY = mmToSteps(cmd.arg2);
+		break;
+	case OP_STOP:
+		targetPosStepsX = posStepsX;
+		targetPosStepsY = posStepsY;
+		break;
+	case OP_START_STORING:
+		storingPlotCmds = true;
+		break;
+	}
 }
 /* USER CODE END 0 */
 
@@ -159,6 +249,8 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   static char txBuf[16];
+  static PlotCmd currentPlotCmd = { 0 };
+  static PlotCmdParseState plotCmdParseState = STATE_OPCODE;
   while (1)
   {
 //	sprintf(txBuf, "ugh %u\r\n", count);
@@ -166,10 +258,16 @@ int main(void)
 //	CDC_Transmit_FS((uint8_t*)txBuf, strlen(txBuf));
 //	HAL_Delay(100);
 	uint8_t rxByte = 0;
+	bool cmdCompleted = false;
 	if (VCP_ReadChar(&rxByte))
 	{
-		sprintf(txBuf, "Got 0x%02X\r\n", rxByte);
-		CDC_Transmit_FS((uint8_t*)txBuf, strlen(txBuf));
+		//sprintf(txBuf, "Got 0x%02X\r\n", rxByte);
+		//CDC_Transmit_FS((uint8_t*)txBuf, strlen(txBuf));
+		cmdCompleted = ParsePlotCmdByte(&currentPlotCmd, &plotCmdParseState, rxByte);
+	}
+	if (cmdCompleted) {
+		cmdCompleted = false;
+		DoPlotCmd(currentPlotCmd);
 	}
     /* USER CODE END WHILE */
 
@@ -232,7 +330,7 @@ void Periodic()
 	bool dirX = targetPosStepsX > posStepsX;
 	if (shouldStepX)
 	{
-		HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+		//HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
 		HAL_GPIO_WritePin(X_DIR_GPIO_Port, X_DIR_Pin, dirX);
 		HAL_GPIO_WritePin(X_STEP_GPIO_Port, X_STEP_Pin, true);
 		volatile int delayer = 10;
