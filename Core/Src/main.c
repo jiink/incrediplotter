@@ -335,7 +335,7 @@ void Periodic()
 	if (shouldStepX)
 	{
 		//HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-		HAL_GPIO_WritePin(X_DIR_GPIO_Port, X_DIR_Pin, dirX);
+		HAL_GPIO_WritePin(X_DIR_GPIO_Port, X_DIR_Pin, !dirX); // note: flipped compared to y
 		HAL_GPIO_WritePin(X_STEP_GPIO_Port, X_STEP_Pin, true);
 		volatile int delayer = 10;
 		while (delayer > 0) { delayer--; }
