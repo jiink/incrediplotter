@@ -60,7 +60,7 @@ typedef enum {
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-#define STEPS_PER_MM 1
+#define STEPS_PER_MM 80
 #define UART_RX_BUF_SIZE 64
 #define MAX_STORED_PLOT_CMDS 16
 /* USER CODE END PM */
@@ -248,7 +248,7 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  static char txBuf[16];
+  static char txBuf[100];
   static PlotCmd currentPlotCmd = { 0 };
   static PlotCmdParseState plotCmdParseState = STATE_OPCODE;
   while (1)
@@ -263,7 +263,11 @@ int main(void)
 	{
 		//sprintf(txBuf, "Got 0x%02X\r\n", rxByte);
 		//CDC_Transmit_FS((uint8_t*)txBuf, strlen(txBuf));
+		PlotCmdParseState stateBefore = plotCmdParseState;
 		cmdCompleted = ParsePlotCmdByte(&currentPlotCmd, &plotCmdParseState, rxByte);
+		sprintf(txBuf, "Rx: %02X\r\nbefore: %u | after: %u\r\ncmdCompleted: %u\r\n---\r\n",
+				rxByte, stateBefore, plotCmdParseState, cmdCompleted);
+		CDC_Transmit_FS((uint8_t*)txBuf, strlen(txBuf));
 	}
 	if (cmdCompleted) {
 		cmdCompleted = false;
