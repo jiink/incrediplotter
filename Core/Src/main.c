@@ -236,6 +236,10 @@ int main(void)
   {
 	  Error_Handler();
   }
+  if (HAL_TIM_Base_Start_IT(&htim4) != HAL_OK)
+  {
+	Error_Handler();
+  }
   targetPosStepsX = 100;
   targetPosStepsY = 100;
   const char msg[] = "****** Incrediplotter v0.2 ******\r\n";
