@@ -125,6 +125,21 @@ int VCP_ReadChar(uint8_t *pChar)
   return 0; // Buffer is empty
 }
 
+void SetPenServoPulseWidth(int microseconds)
+{
+	if (microseconds <= 0)
+	{
+		// disable the servo
+		__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 0);
+		return;
+	}
+	if (microseconds < 500)
+	{
+		microseconds = 500;
+	}
+	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, microseconds);
+}
+
 bool ParsePlotCmdByte(PlotCmd* cmd, PlotCmdParseState* state, uint8_t newByte)
 {
 	bool cmdCompleted = false;
@@ -187,6 +202,9 @@ void DoPlotCmd(PlotCmd cmd)
 		targetPosStepsX = mmToSteps(cmd.arg1);
 		targetPosStepsY = mmToSteps(cmd.arg2);
 		break;
+	case OP_MOVE_PEN:
+		SetPenServoPulseWidth((int)cmd.arg1 * 100);
+		break;
 	case OP_STOP:
 		targetPosStepsX = posStepsX;
 		targetPosStepsY = posStepsY;
@@ -236,7 +254,7 @@ int main(void)
   {
 	  Error_Handler();
   }
-  if (HAL_TIM_Base_Start_IT(&htim4) != HAL_OK)
+  if (HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4))
   {
 	Error_Handler();
   }
