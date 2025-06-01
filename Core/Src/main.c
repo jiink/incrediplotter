@@ -56,6 +56,10 @@ typedef enum {
 	STATE_ARG1,
 	STATE_ARG2
 } PlotCmdParseState;
+typedef struct {
+	int32_t x;
+	int32_t y;
+} Vec2i;
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -63,6 +67,8 @@ typedef enum {
 #define STEPS_PER_MM 80
 #define UART_RX_BUF_SIZE 64
 #define MAX_STORED_PLOT_CMDS 16
+#define MAX_POS_STEPS_X 87
+#define MAX_POS_STEPS_Y 87
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -71,16 +77,19 @@ typedef enum {
 volatile uint8_t VCP_RxBuffer[VCP_RX_BUFFER_SIZE];
 volatile uint32_t VCP_RxWriteIndex = 0; // Written by USB ISR
 volatile uint32_t VCP_RxReadIndex = 0;  // Read by application
-volatile int targetPosStepsX = 0;
-volatile int targetPosStepsY = 0;
-volatile int posStepsX = 0;
-volatile int posStepsY = 0;
+volatile Vec2i targetPosSteps = {0, 0};
+volatile Vec2i posSteps = {0, 0};
 volatile uint8_t rxBuf[UART_RX_BUF_SIZE];
 volatile uint16_t rxBufIdx = 0;
 volatile bool gotCommand = false;
 bool storingPlotCmds = false;
 uint32_t storingPlotCmdsIdx = 0;
 PlotCmd plotCmdBuf[MAX_STORED_PLOT_CMDS] = { 0 };
+volatile Vec2i bresDiff = {0, 0};
+volatile Vec2i bresDir = {0, 0};
+volatile int32_t bresErr = 0;
+volatile bool bresLineActive = false;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -182,6 +191,32 @@ bool storePlotCmd(PlotCmd cmd)
 	return !overflowed;
 }
 
+// Called when new target position is set
+void SetupLineMovement()
+{
+	if (posSteps.x == targetPosSteps.x && posSteps.y == targetPosSteps.y)
+	{
+		bresLineActive = false;
+		return;
+	}
+	bresDiff.x = abs(targetPosSteps.x - posSteps.x);
+	bresDir.x = (posSteps.x < targetPosSteps.x) ? 1 : -1;
+	bresDiff.y = abs(targetPosSteps.y - posSteps.y);
+	bresDir.y = (posSteps.y < targetPosSteps.y) ? 1 : -1;
+	bresErr = bresDiff.x + bresDiff.y;
+	bresLineActive = true;
+	// X needs to be flipped because of the wiring at the present time
+	HAL_GPIO_WritePin(X_DIR_GPIO_Port, X_DIR_Pin, bresDir.x > 0 ? GPIO_PIN_RESET : GPIO_PIN_SET);
+	HAL_GPIO_WritePin(Y_DIR_GPIO_Port, Y_DIR_Pin, bresDir.y > 0 ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+void Stop()
+{
+	targetPosSteps.x = posSteps.x;
+	targetPosSteps.y = posSteps.y;
+	bresLineActive = false;
+}
+
 void DoPlotCmd(PlotCmd cmd)
 {
 	if (cmd.opcode == OP_STOP_STORING)
@@ -199,15 +234,15 @@ void DoPlotCmd(PlotCmd cmd)
 		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, cmd.arg1 != 0);
 		break;
 	case OP_MOVE:
-		targetPosStepsX = mmToSteps(cmd.arg1);
-		targetPosStepsY = mmToSteps(cmd.arg2);
+		targetPosSteps.x = mmToSteps(cmd.arg1);
+		targetPosSteps.y = mmToSteps(cmd.arg2);
+		SetupLineMovement();
 		break;
 	case OP_MOVE_PEN:
 		SetPenServoPulseWidth((int)cmd.arg1 * 100);
 		break;
 	case OP_STOP:
-		targetPosStepsX = posStepsX;
-		targetPosStepsY = posStepsY;
+		Stop();
 		break;
 	case OP_START_STORING:
 		storingPlotCmds = true;
@@ -258,8 +293,8 @@ int main(void)
   {
 	Error_Handler();
   }
-  targetPosStepsX = 100;
-  targetPosStepsY = 100;
+  targetPosSteps.x = 0;
+  targetPosSteps.y = 0;
   const char msg[] = "****** Incrediplotter v0.2 ******\r\n";
   CDC_Transmit_FS((uint8_t*)msg, strlen(msg));
   const char hi[] = "hello world";
@@ -352,36 +387,64 @@ void SystemClock_Config(void)
 
 void Periodic()
 {
-	bool shouldStepX = posStepsX != targetPosStepsX;
-	bool dirX = targetPosStepsX > posStepsX;
-	if (shouldStepX)
+	if (!bresLineActive)
 	{
-		//HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-		HAL_GPIO_WritePin(X_DIR_GPIO_Port, X_DIR_Pin, !dirX); // note: flipped compared to y
-		HAL_GPIO_WritePin(X_STEP_GPIO_Port, X_STEP_Pin, true);
-		volatile int delayer = 10;
-		while (delayer > 0) { delayer--; }
-		HAL_GPIO_WritePin(X_STEP_GPIO_Port, X_STEP_Pin, false);
-		if (dirX) {
-			posStepsX++;
-		} else {
-			posStepsX--;
+		return;
+	}
+	if (posSteps.x == targetPosSteps.x &&
+		posSteps.y == targetPosSteps.y)
+	{
+		bresLineActive = false;
+		return;
+	}
+	if (posSteps.x == 0 && bresDir.x < 1)
+	{
+		return;
+	}
+	int32_t e2 = 2 * bresErr;
+	bool stepX = false;
+	bool stepY = false;
+	// Does X need to step?
+	if (e2 >= bresDiff.y)
+	{
+		if (posSteps.x != targetPosSteps.x)
+		{
+			stepX = true;
 		}
 	}
-	bool shouldStepY = posStepsY != targetPosStepsY;
-	bool dirY = targetPosStepsY > posStepsY;
-	if (shouldStepY)
+	// Does Y need to step?
+	if (e2 <= bresDiff.x)
 	{
-		HAL_GPIO_WritePin(Y_DIR_GPIO_Port, Y_DIR_Pin, dirY);
-		HAL_GPIO_WritePin(Y_STEP_GPIO_Port, Y_STEP_Pin, true);
-		volatile int delayer = 10;
-		while (delayer > 0) { delayer--; }
-		HAL_GPIO_WritePin(Y_STEP_GPIO_Port, Y_STEP_Pin, false);
-		if (dirY) {
-			posStepsY++;
-		} else {
-			posStepsY--;
+		if (posSteps.y != targetPosSteps.y)
+		{
+			stepY = true;
 		}
+	}
+	if (stepX)
+	{
+		if (posSteps.x + bresDir.x < 0 ||
+			posSteps.x + bresDir.x > MAX_POS_STEPS_X)
+		{ // It's gonna crash!
+			return;
+		}
+		HAL_GPIO_WritePin(X_STEP_GPIO_Port, X_STEP_Pin, GPIO_PIN_SET);
+		volatile int delayer = 10; while (delayer > 0) { delayer--; }
+		HAL_GPIO_WritePin(X_STEP_GPIO_Port, X_STEP_Pin, GPIO_PIN_RESET);
+		posSteps.x += bresDir.x;
+		bresErr += bresDiff.y;
+	}
+	if (stepY)
+	{
+		if (posSteps.y + bresDir.y < 0 ||
+			posSteps.y + bresDir.y > MAX_POS_STEPS_Y)
+		{
+			return;
+		}
+		HAL_GPIO_WritePin(Y_STEP_GPIO_Port, Y_STEP_Pin, GPIO_PIN_SET);
+		volatile int delayer = 10; while (delayer > 0) { delayer--; }
+		HAL_GPIO_WritePin(Y_STEP_GPIO_Port, Y_STEP_Pin, GPIO_PIN_RESET);
+		posSteps.y += bresDir.y;
+		bresErr += bresDiff.x;
 	}
 }
 
