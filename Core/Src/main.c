@@ -67,8 +67,8 @@ typedef struct {
 #define STEPS_PER_MM 80
 #define UART_RX_BUF_SIZE 64
 #define MAX_STORED_PLOT_CMDS 16
-#define MAX_POS_STEPS_X 87
-#define MAX_POS_STEPS_Y 87
+#define MAX_POS_STEPS_X (87 * STEPS_PER_MM)
+#define MAX_POS_STEPS_Y (87 * STEPS_PER_MM)
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -192,8 +192,16 @@ bool storePlotCmd(PlotCmd cmd)
 }
 
 // Called when new target position is set
-void SetupLineMovement()
+void SetupLineMovement(int x, int y)
 {
+	targetPosSteps.x = x;
+	targetPosSteps.y = y;
+	if (targetPosSteps.x > MAX_POS_STEPS_X) {
+		targetPosSteps.x = MAX_POS_STEPS_X;
+	}
+	if (targetPosSteps.y > MAX_POS_STEPS_Y) {
+		targetPosSteps.y = MAX_POS_STEPS_Y;
+	}
 	if (posSteps.x == targetPosSteps.x && posSteps.y == targetPosSteps.y)
 	{
 		bresLineActive = false;
@@ -203,7 +211,12 @@ void SetupLineMovement()
 	bresDir.x = (posSteps.x < targetPosSteps.x) ? 1 : -1;
 	bresDiff.y = abs(targetPosSteps.y - posSteps.y);
 	bresDir.y = (posSteps.y < targetPosSteps.y) ? 1 : -1;
-	bresErr = bresDiff.x + bresDiff.y;
+	if (bresDiff.x > bresDiff.y)
+	{
+		bresErr = (2 * bresDiff.y) - bresDiff.x;
+	} else {
+		bresErr = (2 * bresDiff.x) - bresDiff.y;
+	}
 	bresLineActive = true;
 	// X needs to be flipped because of the wiring at the present time
 	HAL_GPIO_WritePin(X_DIR_GPIO_Port, X_DIR_Pin, bresDir.x > 0 ? GPIO_PIN_RESET : GPIO_PIN_SET);
@@ -234,9 +247,7 @@ void DoPlotCmd(PlotCmd cmd)
 		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, cmd.arg1 != 0);
 		break;
 	case OP_MOVE:
-		targetPosSteps.x = mmToSteps(cmd.arg1);
-		targetPosSteps.y = mmToSteps(cmd.arg2);
-		SetupLineMovement();
+		SetupLineMovement(mmToSteps(cmd.arg1), mmToSteps(cmd.arg2));
 		break;
 	case OP_MOVE_PEN:
 		SetPenServoPulseWidth((int)cmd.arg1 * 100);
@@ -397,54 +408,54 @@ void Periodic()
 		bresLineActive = false;
 		return;
 	}
-	if (posSteps.x == 0 && bresDir.x < 1)
+	if (posSteps.x == 0 && bresDir.x < 0)
 	{
 		return;
 	}
-	int32_t e2 = 2 * bresErr;
 	bool stepX = false;
 	bool stepY = false;
-	// Does X need to step?
-	if (e2 >= bresDiff.y)
-	{
-		if (posSteps.x != targetPosSteps.x)
-		{
-			stepX = true;
-		}
-	}
-	// Does Y need to step?
-	if (e2 <= bresDiff.x)
-	{
-		if (posSteps.y != targetPosSteps.y)
+	if (bresDiff.x > bresDiff.y)
+	{ // Gentle slope
+		if (bresErr >= 0)
 		{
 			stepY = true;
+			bresErr -= 2 * bresDiff.x;
 		}
+		stepX = true;
+		bresErr += 2 * bresDiff.y;
+	} else { // Steep slope
+		if (bresErr >= 0)
+		{
+			stepX = true;
+			bresErr -= 2 * bresDiff.y;
+		}
+		stepY = true;
+		bresErr += 2 * bresDiff.x;
+	}
+	if (posSteps.x + bresDir.x < 0 ||
+			posSteps.x + bresDir.x > MAX_POS_STEPS_X)
+	{
+		stepX = false;
+	}
+	if (posSteps.y + bresDir.y < 0 ||
+				posSteps.y + bresDir.y > MAX_POS_STEPS_Y)
+	{
+		stepY = false;
 	}
 	if (stepX)
 	{
-		if (posSteps.x + bresDir.x < 0 ||
-			posSteps.x + bresDir.x > MAX_POS_STEPS_X)
-		{ // It's gonna crash!
-			return;
-		}
+		posSteps.x += bresDir.x;
 		HAL_GPIO_WritePin(X_STEP_GPIO_Port, X_STEP_Pin, GPIO_PIN_SET);
 		volatile int delayer = 10; while (delayer > 0) { delayer--; }
 		HAL_GPIO_WritePin(X_STEP_GPIO_Port, X_STEP_Pin, GPIO_PIN_RESET);
-		posSteps.x += bresDir.x;
-		bresErr += bresDiff.y;
 	}
 	if (stepY)
 	{
-		if (posSteps.y + bresDir.y < 0 ||
-			posSteps.y + bresDir.y > MAX_POS_STEPS_Y)
-		{
-			return;
-		}
+
+		posSteps.y += bresDir.y;
 		HAL_GPIO_WritePin(Y_STEP_GPIO_Port, Y_STEP_Pin, GPIO_PIN_SET);
 		volatile int delayer = 10; while (delayer > 0) { delayer--; }
 		HAL_GPIO_WritePin(Y_STEP_GPIO_Port, Y_STEP_Pin, GPIO_PIN_RESET);
-		posSteps.y += bresDir.y;
-		bresErr += bresDiff.x;
 	}
 }
 
