@@ -23,7 +23,9 @@
 #include "gpio.h"
 #include "usbd_cdc_if.h"
 #include <stdbool.h>
-
+#include <stdarg.h>
+#include <string.h>
+#include <stdio.h>
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -46,23 +48,43 @@ typedef struct {
 typedef enum {
 	OP_RESET,
 	OP_MOVE,
+	OP_PEN_DOWN,
+	OP_PEN_UP,
+	OP_SET_PEN_DOWN,
+	OP_SET_PEN_UP,
 	OP_MOVE_PEN,
+	OP_HOME,
 	OP_START_STORING,
 	OP_STOP_STORING,
 	OP_RUN_STORED,
+	OP_SHOW_STORED,
 	OP_LED,
 	OP_STOP,
+	OP_SET_X_MAX_STEPS,
+	OP_SET_Y_MAX_STEPS,
+	OP_SET_STEPS_PER_MM,
+	OP_DEBUG,
 	OP_MAX
 } PlotCmdOpcode;
 const uint8_t opcodeArgCounts[OP_MAX] = {
     [OP_RESET]         = 0,
     [OP_MOVE]          = 2, // x y
-    [OP_MOVE_PEN]      = 1, // pulse width
-    [OP_START_STORING] = 0,
-    [OP_STOP_STORING]  = 0,
-    [OP_RUN_STORED]    = 0,
-    [OP_LED]           = 1,
-    [OP_STOP]          = 0
+	[OP_PEN_DOWN] = 0,
+	[OP_PEN_UP] = 0,
+	[OP_SET_PEN_DOWN] = 1,
+	[OP_SET_PEN_UP] = 1,
+	[OP_MOVE_PEN] = 1,
+	[OP_HOME] = 0,
+	[OP_START_STORING] = 0,
+	[OP_STOP_STORING] = 0,
+	[OP_RUN_STORED] = 0,
+	[OP_SHOW_STORED] = 0,
+	[OP_LED] = 1,
+	[OP_STOP] = 0,
+	[OP_SET_X_MAX_STEPS] = 2, // high low
+	[OP_SET_Y_MAX_STEPS] = 0, // high low
+	[OP_SET_STEPS_PER_MM] = 0,
+	[OP_DEBUG] = 1
 };
 typedef enum {
 	STATE_OPCODE,
@@ -79,12 +101,10 @@ typedef struct {
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-#define STEPS_PER_MM 41
-#define UART_RX_BUF_SIZE 64
-#define MAX_STORED_PLOT_CMDS 16
-#define MAX_POS_STEPS_X (174 * STEPS_PER_MM)
-#define MAX_POS_STEPS_Y (174 * STEPS_PER_MM)
+#define UART_BUF_SIZE 64
+#define PLOT_CMD_BUF_SIZE 1024
 #define DELIMITER 0xFF
+#define CMD_ACK_MSG "OK\r\n"
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -95,35 +115,70 @@ volatile uint32_t VCP_RxWriteIndex = 0; // Written by USB ISR
 volatile uint32_t VCP_RxReadIndex = 0;  // Read by application
 volatile Vec2i targetPosSteps = {0, 0};
 volatile Vec2i posSteps = {0, 0};
-volatile uint8_t rxBuf[UART_RX_BUF_SIZE];
+volatile uint8_t rxBuf[UART_BUF_SIZE];
 volatile uint16_t rxBufIdx = 0;
 volatile bool gotCommand = false;
 bool storingPlotCmds = false;
 uint32_t storingPlotCmdsIdx = 0;
-PlotCmd plotCmdBuf[MAX_STORED_PLOT_CMDS] = { 0 };
+uint8_t plotCmdBuf[PLOT_CMD_BUF_SIZE] = { 0 };
 volatile Vec2i bresDiff = {0, 0};
 volatile Vec2i bresDir = {0, 0};
 volatile int32_t bresErr = 0;
 volatile bool bresLineActive = false;
-
+int stepsPerMm = 41;
+Vec2i posMaxSteps = {6960, 6960};
+int penUpPulseWidth = 10;
+int penDownPulseWidth = 18;
+bool debugPrints = false;
+volatile bool justFinishedCmd = false;
+bool runningStoredPlotCmds = false;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-
+void DoPlotCmd(PlotCmd cmd);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 int mmToSteps(int mm)
 {
-	return mm * STEPS_PER_MM;
+	return mm * stepsPerMm;
 }
 
 int stepsToMm(int steps)
 {
-	return steps / STEPS_PER_MM;
+	return steps / stepsPerMm;
+}
+
+void Log(const char* fmt, ...)
+{
+    if (fmt == NULL) {
+        return;
+    }
+    static char log_buffer[UART_BUF_SIZE];
+    va_list args;
+    va_start(args, fmt);
+    int len = vsnprintf(log_buffer, UART_BUF_SIZE, fmt, args);
+    va_end(args);
+    if (len < 0) {
+        const char* error_msg = "Log format error\n";
+        CDC_Transmit_FS((uint8_t*)error_msg, strlen(error_msg));
+        return;
+    }
+    if (len > 0) {
+        uint16_t chars_to_send = (len < UART_BUF_SIZE) ? (uint16_t)len : (uint16_t)(UART_BUF_SIZE - 1);
+
+        if (chars_to_send > 0) {
+            CDC_Transmit_FS((uint8_t*)log_buffer, chars_to_send);
+        }
+
+        if (len >= UART_BUF_SIZE) {
+            const char* truncation_msg = "...\n";
+            CDC_Transmit_FS((uint8_t*)truncation_msg, strlen(truncation_msg));
+        }
+    }
 }
 
 uint8_t GetOpcodeArgCount(PlotCmdOpcode opcode)
@@ -187,7 +242,13 @@ bool ParsePlotCmdByte(PlotCmd* cmd, PlotCmdParseState* state, uint8_t newByte)
 	{
 	case STATE_OPCODE:
 		cmd->opcode = newByte;
-		*state = STATE_ARG1;
+		argCount = GetOpcodeArgCount(cmd->opcode);
+		if (argCount == 0) {
+			*state = STATE_OPCODE;
+			cmdCompleted = true;
+		} else {
+			*state = STATE_ARG1;
+		}
 		break;
 	case STATE_ARG1:
 		cmd->arg1 = newByte;
@@ -228,17 +289,56 @@ bool ParsePlotCmdByte(PlotCmd* cmd, PlotCmdParseState* state, uint8_t newByte)
 	return cmdCompleted;
 }
 
-// returns false if overflowed (command storage isn't big enough)
-bool storePlotCmd(PlotCmd cmd)
+// returns false if overflowed  (command storage isn't big enough)
+// or invalid opcode
+bool StorePlotCmd(PlotCmd cmd)
 {
-	if (storingPlotCmdsIdx > MAX_STORED_PLOT_CMDS)
+	if (storingPlotCmdsIdx > PLOT_CMD_BUF_SIZE - 1)
 	{
-		storingPlotCmdsIdx = 0;
+		Log("STORAGE: OVERFLOW! (0)\r\n");
+		return false;
 	}
-	plotCmdBuf[storingPlotCmdsIdx] = cmd;
-	storingPlotCmdsIdx++;
+	if (cmd.opcode >= OP_MAX)
+	{
+		Log("STORAGE: INVALID OPCODE!\r\n");
+		return false;
+	}
+	uint8_t numArgs = GetOpcodeArgCount(cmd.opcode);
+	uint8_t numBToStore = 1 + numArgs;
+	if (storingPlotCmdsIdx + numBToStore > PLOT_CMD_BUF_SIZE - 1)
+	{
+		Log("STORAGE: OVERFLOW! (1)\r\n");
+		return false;
+	}
+	plotCmdBuf[storingPlotCmdsIdx] = cmd.opcode;
+	switch (numArgs)
+	{
+	case 0:
+		break;
+	case 1:
+		plotCmdBuf[storingPlotCmdsIdx + 1] = cmd.arg1;
+		break;
+	case 2:
+		plotCmdBuf[storingPlotCmdsIdx + 1] = cmd.arg1;
+		plotCmdBuf[storingPlotCmdsIdx + 2] = cmd.arg2;
+		break;
+	case 3:
+		plotCmdBuf[storingPlotCmdsIdx + 1] = cmd.arg1;
+		plotCmdBuf[storingPlotCmdsIdx + 2] = cmd.arg2;
+		plotCmdBuf[storingPlotCmdsIdx + 3] = cmd.arg3;
+		break;
+	case 4:
+		plotCmdBuf[storingPlotCmdsIdx + 1] = cmd.arg1;
+		plotCmdBuf[storingPlotCmdsIdx + 2] = cmd.arg2;
+		plotCmdBuf[storingPlotCmdsIdx + 3] = cmd.arg3;
+		plotCmdBuf[storingPlotCmdsIdx + 4] = cmd.arg4;
+		break;
+	default:
+		break;
+	}
+	storingPlotCmdsIdx += numBToStore;
 	bool overflowed = false;
-	if (storingPlotCmdsIdx > MAX_STORED_PLOT_CMDS)
+	if (storingPlotCmdsIdx > PLOT_CMD_BUF_SIZE)
 	{
 		overflowed = true;
 		storingPlotCmdsIdx = 0;
@@ -246,19 +346,43 @@ bool storePlotCmd(PlotCmd cmd)
 	return !overflowed;
 }
 
+void LogPlotCmdStorage()
+{
+	int argCounter = 0;
+	for (int i = 0; i < storingPlotCmdsIdx; i++)
+	{
+		uint8_t b = plotCmdBuf[i];
+		Log("%02X ", b);
+		if (argCounter == 0)
+		{
+			argCounter = GetOpcodeArgCount(b);
+			if (argCounter == 0) {
+				Log("\r\n");
+			}
+		} else {
+			argCounter--;
+			if (argCounter == 0) {
+				Log("\r\n");
+			}
+		}
+	}
+}
+
 // Called when new target position is set
 void SetupLineMovement(int x, int y)
 {
 	targetPosSteps.x = x;
 	targetPosSteps.y = y;
-	if (targetPosSteps.x > MAX_POS_STEPS_X) {
-		targetPosSteps.x = MAX_POS_STEPS_X;
+	if (targetPosSteps.x > posMaxSteps.x) {
+		targetPosSteps.x = posMaxSteps.x;
 	}
-	if (targetPosSteps.y > MAX_POS_STEPS_Y) {
-		targetPosSteps.y = MAX_POS_STEPS_Y;
+	if (targetPosSteps.y > posMaxSteps.y) {
+		targetPosSteps.y = posMaxSteps.y;
 	}
 	if (posSteps.x == targetPosSteps.x && posSteps.y == targetPosSteps.y)
 	{
+		justFinishedCmd = true;
+		Log(CMD_ACK_MSG);
 		bresLineActive = false;
 		return;
 	}
@@ -285,34 +409,161 @@ void Stop()
 	bresLineActive = false;
 }
 
+// true on success
+bool RunStoredPlotCmds(uint8_t* plotCmdBuf, size_t maxIdx)
+{
+	if (runningStoredPlotCmds)
+	{
+		return false;
+	}
+	runningStoredPlotCmds = true;
+	size_t idx = 0;
+	while (idx < maxIdx) {
+		PlotCmd cmdToRun = { 0 };
+		cmdToRun.opcode = plotCmdBuf[idx];
+		idx++;
+		if (cmdToRun.opcode >= OP_MAX)
+		{
+			Log("PLAYBACK: INVALID OPCODE!\r\n");
+			runningStoredPlotCmds = false;
+			return false;
+		}
+		uint8_t numArgs = GetOpcodeArgCount(cmdToRun.opcode);
+		if (idx + numArgs > maxIdx)
+		{
+			Log("PLAYBACK: OVERRUN!\r\n");
+			runningStoredPlotCmds = false;
+			return false;
+		}
+		if (numArgs > 0) {
+			cmdToRun.arg1 = plotCmdBuf[idx++];
+		}
+		if (numArgs > 1) {
+			cmdToRun.arg2 = plotCmdBuf[idx++];
+		}
+		if (numArgs > 2) {
+			cmdToRun.arg3 = plotCmdBuf[idx++];
+		}
+		if (numArgs > 3) {
+			cmdToRun.arg4 = plotCmdBuf[idx++];
+		}
+		justFinishedCmd = false;
+		DoPlotCmd(cmdToRun);
+		int c = 0;
+		while (!justFinishedCmd)
+		{
+			HAL_Delay(1);
+			c++;
+			if (c > 8000)
+			{
+				Log("Timed out.\r\n");
+				break;
+			}
+		}
+		justFinishedCmd = false;
+	}
+	runningStoredPlotCmds = false;
+	Log("Done.\r\n");
+	return true;
+}
+
+void LogPlotCmd(PlotCmd cmd)
+{
+	Log("Op: %02X args: %02X %02X %02X %02X\r\n",
+		cmd.opcode, cmd.arg1, cmd.arg2, cmd.arg3, cmd.arg4);
+}
+
 void DoPlotCmd(PlotCmd cmd)
 {
+	if (cmd.opcode >= OP_MAX)
+	{
+		Log("INVALID OPCODE!\r\n");
+		return;
+	}
+	if (debugPrints)
+	{
+		LogPlotCmd(cmd);
+	}
 	if (cmd.opcode == OP_STOP_STORING)
 	{
+		Log("Storing stopped.");
 		storingPlotCmds = false;
 	}
 	if (storingPlotCmds)
 	{
-		storePlotCmd(cmd);
+		StorePlotCmd(cmd);
 		return;
 	}
+	bool immediateReply = true;
 	switch (cmd.opcode)
 	{
-	case OP_LED:
-		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, cmd.arg1 != 0);
-		break;
 	case OP_MOVE:
 		SetupLineMovement(mmToSteps(cmd.arg1), mmToSteps(cmd.arg2));
+		immediateReply = false;
+		break;
+	case OP_PEN_DOWN:
+		SetPenServoPulseWidth(penDownPulseWidth);
+		break;
+	case OP_PEN_UP:
+		SetPenServoPulseWidth(penUpPulseWidth);
+		break;
+	case OP_SET_PEN_DOWN:
+		penDownPulseWidth = (int)cmd.arg1 * 100;
+		break;
+	case OP_SET_PEN_UP:
+		penUpPulseWidth = (int)cmd.arg1 * 100;
 		break;
 	case OP_MOVE_PEN:
 		SetPenServoPulseWidth((int)cmd.arg1 * 100);
 		break;
+	case OP_HOME:
+		// todo
+		break;
+	case OP_START_STORING:
+		storingPlotCmdsIdx = 0;
+		storingPlotCmds = true;
+		Log("Storing started.");
+		break;
+	case OP_STOP_STORING:
+		// Handled before this switch statement.
+		break;
+	case OP_RUN_STORED:
+		RunStoredPlotCmds(plotCmdBuf, storingPlotCmdsIdx);
+		break;
+	case OP_SHOW_STORED:
+		LogPlotCmdStorage();
+		break;
+	case OP_LED:
+		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, cmd.arg1 != 0);
+		break;
 	case OP_STOP:
 		Stop();
 		break;
-	case OP_START_STORING:
-		storingPlotCmds = true;
+	case OP_SET_X_MAX_STEPS:
+		posMaxSteps.x = (cmd.arg1 << 8) | cmd.arg2;
 		break;
+	case OP_SET_Y_MAX_STEPS:
+		posMaxSteps.y = (cmd.arg1 << 8) | cmd.arg2;
+		break;
+	case OP_SET_STEPS_PER_MM:
+		stepsPerMm = cmd.arg1;
+		break;
+	case OP_DEBUG:
+		debugPrints = (bool)cmd.arg1;
+		if (debugPrints)
+		{
+			Log("Debug prints on.");
+		} else {
+			Log("Debug prints off.");
+		}
+		break;
+	default:
+		break;
+	}
+	if (immediateReply)
+	{
+		justFinishedCmd = true;
+		Log(CMD_ACK_MSG);
 	}
 }
 /* USER CODE END 0 */
@@ -371,7 +622,6 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  static char txBuf[100];
   static PlotCmd currentPlotCmd = { 0 };
   static PlotCmdParseState plotCmdParseState = STATE_OPCODE;
   while (1)
@@ -388,13 +638,20 @@ int main(void)
 		//CDC_Transmit_FS((uint8_t*)txBuf, strlen(txBuf));
 		PlotCmdParseState stateBefore = plotCmdParseState;
 		cmdCompleted = ParsePlotCmdByte(&currentPlotCmd, &plotCmdParseState, rxByte);
-		sprintf(txBuf, "Rx: %02X\r\nbefore: %u | after: %u\r\ncmdCompleted: %u\r\n---\r\n",
-				rxByte, stateBefore, plotCmdParseState, cmdCompleted);
-		CDC_Transmit_FS((uint8_t*)txBuf, strlen(txBuf));
+		if (debugPrints)
+		{
+			Log("Rx: %02X\r\nbefore: %u | after: %u\r\ncmdCompleted: %u\r\n---\r\n",
+					rxByte, stateBefore, plotCmdParseState, cmdCompleted);
+		}
 	}
 	if (cmdCompleted) {
 		cmdCompleted = false;
 		DoPlotCmd(currentPlotCmd);
+	}
+	if (justFinishedCmd)
+	{
+		justFinishedCmd = false;
+		Log(CMD_ACK_MSG);
 	}
     /* USER CODE END WHILE */
 
@@ -460,11 +717,8 @@ void Periodic()
 	if (posSteps.x == targetPosSteps.x &&
 		posSteps.y == targetPosSteps.y)
 	{
+		justFinishedCmd = true;
 		bresLineActive = false;
-		return;
-	}
-	if (posSteps.x == 0 && bresDir.x < 0)
-	{
 		return;
 	}
 	bool stepX = false;
@@ -488,12 +742,12 @@ void Periodic()
 		bresErr += 2 * bresDiff.x;
 	}
 	if (posSteps.x + bresDir.x < 0 ||
-			posSteps.x + bresDir.x > MAX_POS_STEPS_X)
+			posSteps.x + bresDir.x > posMaxSteps.x)
 	{
 		stepX = false;
 	}
 	if (posSteps.y + bresDir.y < 0 ||
-				posSteps.y + bresDir.y > MAX_POS_STEPS_Y)
+				posSteps.y + bresDir.y > posMaxSteps.y)
 	{
 		stepY = false;
 	}
@@ -522,16 +776,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	}
 }
 
-//uint8_t CDC_DataReceivedHandler(const uint8_t *Buf, uint32_t len)
-//{
-//	for (uint32_t i = 0; i < len; i++)
-//	{
-//		CDC_Transmit((const uint8_t*)"Got: ", 5);
-//		CDC_Transmit(&Buf[i], 1);
-//	}
-//	return CDC_RX_DATA_HANDLED;
-//
-//}
 /* USER CODE END 4 */
 
 /**
