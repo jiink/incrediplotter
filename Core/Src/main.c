@@ -40,6 +40,8 @@ typedef struct {
 	uint8_t opcode;
 	uint8_t arg1;
 	uint8_t arg2;
+	uint8_t arg3;
+	uint8_t arg4;
 } PlotCmd;
 typedef enum {
 	OP_RESET,
@@ -49,12 +51,25 @@ typedef enum {
 	OP_STOP_STORING,
 	OP_RUN_STORED,
 	OP_LED,
-	OP_STOP
+	OP_STOP,
+	OP_MAX
 } PlotCmdOpcode;
+const uint8_t opcodeArgCounts[OP_MAX] = {
+    [OP_RESET]         = 0,
+    [OP_MOVE]          = 2, // x y
+    [OP_MOVE_PEN]      = 1, // pulse width
+    [OP_START_STORING] = 0,
+    [OP_STOP_STORING]  = 0,
+    [OP_RUN_STORED]    = 0,
+    [OP_LED]           = 1,
+    [OP_STOP]          = 0
+};
 typedef enum {
 	STATE_OPCODE,
 	STATE_ARG1,
-	STATE_ARG2
+	STATE_ARG2,
+	STATE_ARG3,
+	STATE_ARG4
 } PlotCmdParseState;
 typedef struct {
 	int32_t x;
@@ -64,11 +79,12 @@ typedef struct {
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-#define STEPS_PER_MM 80
+#define STEPS_PER_MM 41
 #define UART_RX_BUF_SIZE 64
 #define MAX_STORED_PLOT_CMDS 16
-#define MAX_POS_STEPS_X (87 * STEPS_PER_MM)
-#define MAX_POS_STEPS_Y (87 * STEPS_PER_MM)
+#define MAX_POS_STEPS_X (174 * STEPS_PER_MM)
+#define MAX_POS_STEPS_Y (174 * STEPS_PER_MM)
+#define DELIMITER 0xFF
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -108,6 +124,15 @@ int mmToSteps(int mm)
 int stepsToMm(int steps)
 {
 	return steps / STEPS_PER_MM;
+}
+
+uint8_t GetOpcodeArgCount(PlotCmdOpcode opcode)
+{
+    if ((unsigned)opcode < OP_MAX) {
+        return opcodeArgCounts[opcode];
+    } else {
+        return 0xFF;
+    }
 }
 
 void USB_DEVICE_MasterHardReset(void)
@@ -151,7 +176,13 @@ void SetPenServoPulseWidth(int microseconds)
 
 bool ParsePlotCmdByte(PlotCmd* cmd, PlotCmdParseState* state, uint8_t newByte)
 {
+	if (newByte == DELIMITER)
+	{
+		*state = STATE_OPCODE;
+		return false;
+	}
 	bool cmdCompleted = false;
+	uint8_t argCount = GetOpcodeArgCount(cmd->opcode);
 	switch (*state)
 	{
 	case STATE_OPCODE:
@@ -160,14 +191,38 @@ bool ParsePlotCmdByte(PlotCmd* cmd, PlotCmdParseState* state, uint8_t newByte)
 		break;
 	case STATE_ARG1:
 		cmd->arg1 = newByte;
-		*state = STATE_ARG2;
+		if (argCount == 1) {
+			*state = STATE_OPCODE;
+			cmdCompleted = true;
+		} else {
+			*state = STATE_ARG2;
+		}
 		break;
 	case STATE_ARG2:
 		cmd->arg2 = newByte;
-		cmdCompleted = true;
+		if (argCount == 2) {
+			*state = STATE_OPCODE;
+			cmdCompleted = true;
+		} else {
+			*state = STATE_ARG3;
+		}
+		break;
+	case STATE_ARG3:
+		cmd->arg3 = newByte;
+		if (argCount == 3) {
+			*state = STATE_OPCODE;
+			cmdCompleted = true;
+		} else {
+			*state = STATE_ARG4;
+		}
+		break;
+	case STATE_ARG4:
+		cmd->arg4 = newByte;
 		*state = STATE_OPCODE;
+		cmdCompleted = true;
 		break;
 	default:
+		*state = STATE_OPCODE;
 		break;
 	}
 	return cmdCompleted;
