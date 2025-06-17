@@ -64,11 +64,12 @@ typedef enum {
 	OP_SET_Y_MAX_STEPS,
 	OP_SET_STEPS_PER_MM,
 	OP_DEBUG,
+	OP_SET_SERVO_WAIT_MS,
 	OP_MAX
 } PlotCmdOpcode;
 const uint8_t opcodeArgCounts[OP_MAX] = {
     [OP_RESET]         = 0,
-    [OP_MOVE]          = 2, // x y
+    [OP_MOVE]          = 4, // x mm, x mm frac, y mm, y mm frac
 	[OP_PEN_DOWN] = 0,
 	[OP_PEN_UP] = 0,
 	[OP_SET_PEN_DOWN] = 1,
@@ -84,7 +85,8 @@ const uint8_t opcodeArgCounts[OP_MAX] = {
 	[OP_SET_X_MAX_STEPS] = 2, // high low
 	[OP_SET_Y_MAX_STEPS] = 0, // high low
 	[OP_SET_STEPS_PER_MM] = 0,
-	[OP_DEBUG] = 1
+	[OP_DEBUG] = 1,
+	[OP_SET_SERVO_WAIT_MS] = 1 // ms/10
 };
 typedef enum {
 	STATE_OPCODE,
@@ -102,7 +104,7 @@ typedef struct {
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 #define UART_BUF_SIZE 64
-#define PLOT_CMD_BUF_SIZE 1024
+#define PLOT_CMD_BUF_SIZE 4096
 #define DELIMITER 0xFF
 #define CMD_ACK_MSG "OK\r\n"
 /* USER CODE END PM */
@@ -129,6 +131,8 @@ int stepsPerMm = 41;
 Vec2i posMaxSteps = {6960, 6960};
 int penUpPulseWidth = 18 * 100;
 int penDownPulseWidth = 10 * 100;
+uint32_t servoWaitMs = 400;
+int servoWaitCountdown = -1;
 bool debugPrints = false;
 volatile bool justFinishedCmd = false;
 bool runningStoredPlotCmds = false;
@@ -145,6 +149,13 @@ void DoPlotCmd(PlotCmd cmd);
 int mmToSteps(int mm)
 {
 	return mm * stepsPerMm;
+}
+
+int mmToStepsFrac(int mm, uint8_t fractional)
+{
+	int wholeSteps = mm * stepsPerMm;
+	int fracSteps = ((long)fractional * stepsPerMm) / 256;
+	return wholeSteps + fracSteps;
 }
 
 int stepsToMm(int steps)
@@ -459,6 +470,15 @@ bool RunStoredPlotCmds(uint8_t* plotCmdBuf, size_t maxIdx)
 				Log("Timed out.\r\n");
 				break;
 			}
+			if (servoWaitCountdown > 0)
+			{
+				servoWaitCountdown--;
+			}
+			if (servoWaitCountdown == 0)
+			{
+				servoWaitCountdown = -1;
+				justFinishedCmd = true;
+			}
 		}
 		justFinishedCmd = false;
 	}
@@ -498,14 +518,18 @@ void DoPlotCmd(PlotCmd cmd)
 	switch (cmd.opcode)
 	{
 	case OP_MOVE:
-		SetupLineMovement(mmToSteps(cmd.arg1), mmToSteps(cmd.arg2));
+		SetupLineMovement(mmToStepsFrac(cmd.arg1, cmd.arg2), mmToStepsFrac(cmd.arg3, cmd.arg4));
 		immediateReply = false;
 		break;
 	case OP_PEN_DOWN:
 		SetPenServoPulseWidth(penDownPulseWidth);
+		servoWaitCountdown = servoWaitMs;
+		immediateReply = false;
 		break;
 	case OP_PEN_UP:
 		SetPenServoPulseWidth(penUpPulseWidth);
+		servoWaitCountdown = servoWaitMs;
+		immediateReply = false;
 		break;
 	case OP_SET_PEN_DOWN:
 		penDownPulseWidth = (int)cmd.arg1 * 100;
@@ -556,6 +580,9 @@ void DoPlotCmd(PlotCmd cmd)
 		} else {
 			Log("Debug prints off.");
 		}
+		break;
+	case OP_SET_SERVO_WAIT_MS:
+		servoWaitMs = cmd.arg1 * 10;
 		break;
 	default:
 		break;
