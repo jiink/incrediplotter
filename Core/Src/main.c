@@ -21,14 +21,14 @@
 #include "tim.h"
 #include "usb_device.h"
 #include "gpio.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
 #include "usbd_cdc_if.h"
 #include <stdbool.h>
 #include <stdarg.h>
 #include <string.h>
 #include <stdio.h>
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
-
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -65,6 +65,7 @@ typedef enum {
 	OP_SET_STEPS_PER_MM,
 	OP_DEBUG,
 	OP_SET_SERVO_WAIT_MS,
+	OP_SET_MAX_SPEED,
 	OP_MAX
 } PlotCmdOpcode;
 const uint8_t opcodeArgCounts[OP_MAX] = {
@@ -86,7 +87,8 @@ const uint8_t opcodeArgCounts[OP_MAX] = {
 	[OP_SET_Y_MAX_STEPS] = 0, // high low
 	[OP_SET_STEPS_PER_MM] = 0,
 	[OP_DEBUG] = 1,
-	[OP_SET_SERVO_WAIT_MS] = 1 // ms/10
+	[OP_SET_SERVO_WAIT_MS] = 1, // ms/10
+	[OP_SET_MAX_SPEED] = 1 // steps per sec / 100
 };
 typedef enum {
 	STATE_OPCODE,
@@ -136,6 +138,7 @@ int servoWaitCountdown = -1;
 bool debugPrints = false;
 volatile bool justFinishedCmd = false;
 bool runningStoredPlotCmds = false;
+uint32_t maxSpeedStepsSec = 1000;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -420,6 +423,20 @@ void Stop()
 	bresLineActive = false;
 }
 
+void SetStepperSpeed(int stepsPerSec)
+{
+	// find what the 1 mhz counter should count to
+	uint16_t cmpVal = 0;
+	if (stepsPerSec <= 0)
+	{
+		cmpVal = 0xFFFF;
+	} else {
+		const int timerFreq = 1000000; // has to be consistent with the ioc setup. could find what variable it changes but eh.
+		cmpVal = timerFreq / stepsPerSec;
+	}
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, cmpVal);
+}
+
 // true on success
 bool RunStoredPlotCmds(uint8_t* plotCmdBuf, size_t maxIdx)
 {
@@ -584,6 +601,10 @@ void DoPlotCmd(PlotCmd cmd)
 	case OP_SET_SERVO_WAIT_MS:
 		servoWaitMs = cmd.arg1 * 10;
 		break;
+	case OP_SET_MAX_SPEED:
+		maxSpeedStepsSec = cmd.arg1 * 100;
+		SetStepperSpeed(maxSpeedStepsSec);
+		break;
 	default:
 		break;
 	}
@@ -639,7 +660,7 @@ int main(void)
   }
   targetPosSteps.x = 0;
   targetPosSteps.y = 0;
-  const char msg[] = "****** Incrediplotter v0.2 ******\r\n";
+  const char msg[] = "****** Incrediplotter v0.3 ******\r\n";
   CDC_Transmit_FS((uint8_t*)msg, strlen(msg));
   const char hi[] = "hello world";
   CDC_Transmit_FS((uint8_t*)hi, strlen(hi));
@@ -795,7 +816,7 @@ void Periodic()
 	}
 }
 
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	if (htim->Instance == TIM1)
 	{
